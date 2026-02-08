@@ -166,7 +166,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    START([用户调用 cancelOrders]) --> LOAD[加载订单: orders[orderKey]]
+    START([用户调用 cancelOrders]) --> LOAD["加载订单: orders(orderKey)"]
     LOAD --> CHECK{验证条件}
     
     CHECK -->|失败| SKIP[发出 LogSkipOrder 事件]
