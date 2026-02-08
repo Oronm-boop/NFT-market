@@ -58,7 +58,7 @@ library LibOrder {
         LibOrder.Order buyOrder;
     }
 
-    OrderKey public constant ORDERKEY_SENTINEL = OrderKey.wrap(0x0);
+    OrderKey public constant ORDERKEY_SENTINEL = OrderKey.wrap(0x0); // sentinel
 
     bytes32 public constant ASSET_TYPEHASH =
         keccak256("Asset(uint256 tokenId,address collection,uint96 amount)");
