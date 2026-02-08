@@ -1,261 +1,344 @@
-# EasySwap Hardhat Project
+# 🔷 EasySwap Contract
 
-## 背景介绍
-> 2020 年是 DeFi 元年 
-> 2021 年是 NFT 元年
+> 基于 **链下订单簿 + 链上结算** 架构的 NFT 交易智能合约
 
-- 数字资产的兴起与需求
-- 去中心化的市场需求
-- 版权保护和二级市场
-- 全球化市场的潜力
-- 技术与金融的融合
+[![Solidity](https://img.shields.io/badge/Solidity-0.8.x-363636?logo=solidity)](https://soliditylang.org/)
+[![Hardhat](https://img.shields.io/badge/Hardhat-Framework-yellow?logo=ethereum)](https://hardhat.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue)](./LICENSE)
 
-## 项目意义
-当前的 NFT 交易市场不仅是一个基于区块链的应用，也是链上技术与链下服务高度结合的典型范例。通过项目的设计和开发，可以探索如何将区块链的去中心化、透明性、不可篡改等特点与传统的链下业务流程进行有机融合，创建一个灵活、可扩展的系统架构，不仅服务于 NFT 交易市场，还能支持未来其他潜在的链上应用，如 Bitcoin 上的铭文、符文等新兴数字资产。以下从几个关键角度说明项目的深远意义：
+---
 
-- 技术架构的通用性和可扩展性
-- 链上技术原理与链下服务的结合
-- 去中心化应用的场景扩展
- 
-## NFT 基本概念
-![alt text](./docs/images/nft_basic.png)
+## 📖 项目简介
 
-## NFT 的核心操作
-详见：[Ethereum Improvement Proposals](https://eips.ethereum.org/EIPS/eip-721) 
+EasySwap Contract 是一套完整的 **NFT 订单簿交易系统智能合约**，采用类似 OpenSea / LooksRare 的架构设计：
 
-ERC-721: Non-Fungible Token Standard
-transfer
-```solidity
-safeTransferFrom(address _from, address _to, uint256 _tokenId)
-transferFrom(address _from, address _to, uint256 _tokenId)
+- 🔐 **链下签名**：用户通过 EIP-712 签名创建订单，无需 Gas
+- ⛓️ **链上结算**：资产交换在链上完成，保证安全性
+- 💰 **资产托管**：独立的 Vault 合约管理 NFT 和 ETH
+- 📊 **协议费管理**：灵活的手续费配置
+
+---
+
+## 🏗️ 合约架构
+
+```
+EasySwapContract/
+├── contracts/
+│   ├── EasySwapOrderBook.sol    # 核心交易合约 (OrderBookExchange)
+│   ├── EasySwapVault.sol        # 资产托管合约 (OrderVault)
+│   ├── OrderStorage.sol         # 订单存储模块
+│   ├── OrderValidator.sol       # 订单验证模块
+│   ├── ProtocolManager.sol      # 协议费管理模块
+│   ├── interface/               # 接口定义
+│   └── libraries/               # 工具库
+├── scripts/                     # 部署脚本
+├── test/                        # 测试用例
+└── docs/                        # 文档资源
 ```
 
-approve
-```solidity
-approve(address _approved, uint256 _tokenId)
-setApprovalForAll(address _operator, bool _approved)
-```
- 
- 
-## NFT 数据模型
-```
-Collection ———— NFT 集合的实体
+### 核心合约组件
 
-Item ———— 代表交易系统中代表 NFT 的实体
-
-Ownership ———— 代表 NFT 的所有权，也就是 Item 的 Owner， 即 Item 和 Wallet 的关联关系
-
-Order ———— 代表出售或购买 NFT 意愿的实体。
-
-Activity ———— 代表 NFT 状态下发生的事件：mint, transfer, list, buy 等 
-```
-
-![alt text](./docs/images/nft_data_model.png)
-
-## NFT 交易模式
-1. NFT 订单在链下: 非 dex
-2. NFT 订单在链上:dex
-
-**订单簿 OrderBook**: Maker, Taker: 用户; 价格确定于订单
-
-**做市商 AMM**: ERC721——AMM: Maker, Taker: 一方是池子, 一方是用户; 价格是随池子变化的;
-
-## 项目描述
-
-### 架构图
-
-#### API 服务
-![alt text](/docs/images/api_service.png)
-
-
-#### 交易同步服务
-![alt text](/docs/images/sync_service.png)
-![alt text](/docs/images/schedule_task.png)
-
-#### NFT 导入服务
-![alt text](/docs/images/importer_service.png)
-
-#### 微服务功能描述
-![alt text](/docs/images/micro_service.png)
-
-涉及 Collection，Item， Order， Activity 等实体的相关接口请求
-```sql
-create table ob_collection_sepolia
-(
-    id                 bigint auto_increment comment '主键'
-        primary key,
-    chain_id           tinyint    default 1 not null comment '链类型(1:以太坊)',
-    symbol             varchar(128)         not null comment '项目标识',
-    name               varchar(128)         not null comment '项目名称',
-    creator            varchar(42)          not null comment '创建者',
-    address            varchar(42)          not null comment '链上合约地址',
-    owner_amount       bigint     default 0 not null comment '拥有item人数',
-    item_amount        bigint     default 0 not null comment '该项目NFT的发行总量',
-    floor_price        decimal(30)          null comment '整个collection中item的最低的listing价格',
-    sale_price         decimal(30)          null comment '整个collection中bid的最高的价格',
-    description        varchar(2048)        null comment '项目描述',
-    website            varchar(512)         null comment '项目官网地址',
-          /twitter...
-    volume_total       decimal(30)          null comment '总交易量',
-    image_uri          varchar(512)         null comment '项目封面图的链接',
-    // is_need_refresh    tinyint    default 0 not null comment '是否需要刷新',
-    create_time        bigint               null comment '创建时间',
-    update_time        bigint               null comment '更新时间',
-    constraint index_unique_address
-        unique (address)
-);
-
-create table ob_item_sepolia
-(
-    id                 bigint auto_increment comment '主键'
-        primary key,
-    chain_id           tinyint      default 1                     not null comment '链类型',
-    token_id           varchar(128)                               not null comment 'token_id',
-    name               varchar(128)                               not null comment 'nft名称',
-    owner              varchar(42)                                null comment '拥有者',
-    collection_address varchar(42)                                null comment '合约地址',
-    creator            varchar(42)                                not null comment '创建者',
-    supply             bigint                                     not null comment 'item供应量',
-    list_price         decimal(30)                                null comment '上架价格',
-    list_time          bigint                                     null comment '上架时间',
-    sale_price         decimal(30)                                null comment '上一次成交价格',
-    create_time        bigint                                     null comment '创建时间',
-    update_time        bigint                                     null comment '更新时间',
-    constraint index_collection_token
-        unique (collection_address, token_id)
-);
-
-create table ob_order_sepolia
-(
-    id                 bigint auto_increment comment '主键'
-        primary key,
-    marketplace_id     tinyint     default 0     not null comment '0.local',
-    order_id           varchar(66)               not null comment '订单hash',
-    order_status       tinyint     default 0     not null comment '标记订单状态',
-    order_type         tinyint                   not null comment '1: listing 2:offer 3:collection bid 4:item bid',
-    event_time         bigint                    null comment '订单时间',
+```mermaid
+graph TB
+    subgraph "📜 EasySwapOrderBook"
+        EXCHANGE["OrderBookExchange<br/>━━━━━━━━━━━━<br/>核心交易逻辑"]
+        STORAGE["OrderStorage<br/>订单状态管理"]
+        VALIDATOR["OrderValidator<br/>EIP-712 签名验证"]
+        PROTOCOL["ProtocolManager<br/>协议费收取"]
+    end
     
-    collection_address varchar(42)               null,
-    token_id           varchar(128)              null,
-    expire_time        bigint                    null,
-    price              decimal(30) default 0     not null,
-    maker              varchar(42)               null,
-    taker              varchar(42)               null,
-    quantity_remaining bigint      default 1     not null comment 'erc721: 1, erc1155: n',
-    size               bigint      default 1     not null,
-    salt               bigint      default 0     null,
-    currency_address   varchar(42) default '0x0' not null ,
-    create_time        bigint                    null comment '创建时间',
-    update_time        bigint                    null comment '更新时间',
-    constraint index_hash
-        unique (order_id)
-);
-
-create table ob_activity_sepolia
-(
-    id                 bigint auto_increment comment '主键'
-        primary key,
-    activity_type      tinyint                 not null comment '(1:Buy,2:Mint,3:List,4:Cancel Listing,5:Cancel Offer,6.Make Offer,7.Sell,8.Transfer,9.Collection-bid,10.Item-bid)',
-    maker              varchar(42)             null comment '对于buy,sell,listing,transfer类型指的是nft流转的起始方，即卖方address。对于其他类型可以理解为发起方，如make offer谁发起的from就是谁的地址',
-    taker              varchar(42)             null comment '目标方,和maker相对',
-    marketplace_id     tinyint     default 0   not null,
-    collection_address varchar(42)             null,
-    token_id           varchar(128)            null,
-    currency_address   varchar(42) default '1' not null comment '货币类型(1表示eth)',
-    price              decimal(30) default 0   not null comment 'nft 价格',
-    block_number       bigint      default 0   not null comment '区块号',
-    tx_hash            varchar(66)             null comment '交易事务hash',
-    event_time         bigint                  null comment '链上事件发生的时间',
-    create_time        bigint                  null comment '创建时间',
-    update_time        bigint                  null comment '更新时间',
-    constraint index_tx_collection_token_type
-        unique (tx_hash, collection_address, token_id, activity_type)
-);
-
+    VAULT["EasySwapVault<br/>━━━━━━━━━━━━<br/>NFT & ETH 托管"]
+    
+    EXCHANGE --> STORAGE
+    EXCHANGE --> VALIDATOR
+    EXCHANGE --> PROTOCOL
+    EXCHANGE <--> VAULT
+    
+    style EXCHANGE fill:#ff9800,color:#fff
+    style VAULT fill:#4caf50,color:#fff
 ```
 
-## 交易合约核心功能
-基于智能合约实现基于订单簿模型的 NFT 交易系统, 即能够支持以下写入操作和查询操作;
+| 合约 | 功能 | 说明 |
+|:---|:---|:---|
+| `EasySwapOrderBook` | 核心交易 | 订单撮合、签名验证、资产结算 |
+| `EasySwapVault` | 资产托管 | 独立存储 NFT 和 ETH，隔离风险 |
+| `OrderStorage` | 订单存储 | 管理订单状态 (Active/Fulfilled/Cancelled) |
+| `OrderValidator` | 签名验证 | EIP-712 结构化签名验证 |
+| `ProtocolManager` | 费用管理 | 协议手续费配置与收取 |
 
-### 写入操作:
+---
 
-链上订单簿(OrderBook DEX)支持 create limit sell/buy, market sell/buy order, edit(cancel&create)/cancel order 功能;
+## ⚡ 核心功能
 
-1. **limit sell order:**
-2. **limit buy order:**
-3. **market sell order:**
-4. **market buy order:**
-5. **edit/cancel order:**
+### 订单类型
 
-### 查询操作:
->1. 支持从链上查询订单（包括已经过期订单）;
+| 类型 | 说明 | 流程 |
+|:---|:---|:---|
+| **Listing** | 卖家挂单出售 | 签名挂单 → 买家吃单 → 链上结算 |
+| **Offer** | 买家对单品出价 | 存入 ETH → 签名出价 → 卖家接受 |
+| **Collection Bid** | 买家对整个集合出价 | 存入 ETH → 集合出价 → 持有者接受 |
 
-## 合约构成及组件
-1. OrderBookExchange: 实现完整的订单簿交易逻辑
-    - OrderStorage: 用于存储订单信息的模块
-    - OrderValidator: 用于处理订单逻辑验证的模块
-    - ProtocolManager: 用于管理协议费的模块
-2. OrderVault: 独立存储订单相关资产的模块;
+### 写入操作
 
+```solidity
+// 创建限价卖单 (Listing)
+function createLimitSellOrder(Order calldata order, bytes calldata signature) external;
 
-## 项目运行准备
+// 创建限价买单 (Offer/Bid)
+function createLimitBuyOrder(Order calldata order) external payable;
 
-### 1. Install dependencies
-before install dependencies, please make sure you have installed node and npm.
-and install hardhat by following [hardhat official guide](https://hardhat.org/hardhat-runner/docs/getting-started#installation).
+// 成交订单
+function fulfillOrder(Order calldata order, bytes calldata signature) external payable;
 
-```shell
+// 取消订单
+function cancelOrder(bytes32 orderId) external;
+
+// 批量成交
+function batchFulfillOrders(Order[] calldata orders, bytes[] calldata signatures) external payable;
+```
+
+### 查询操作
+
+```solidity
+// 查询订单状态
+function getOrderStatus(bytes32 orderId) external view returns (OrderStatus);
+
+// 查询订单详情
+function getOrder(bytes32 orderId) external view returns (Order memory);
+
+// 验证订单签名
+function verifyOrderSignature(Order calldata order, bytes calldata signature) external view returns (bool);
+```
+
+---
+
+## 🔐 EIP-712 签名机制
+
+采用 [EIP-712](https://eips.ethereum.org/EIPS/eip-712) 结构化数据签名，提升用户体验和安全性：
+
+```solidity
+// 订单结构
+struct Order {
+    address maker;           // 订单创建者
+    address taker;           // 指定成交者 (0x0 表示任意)
+    address collection;      // NFT 合约地址
+    uint256 tokenId;         // Token ID
+    uint256 price;           // 价格 (wei)
+    uint256 expireTime;      // 过期时间
+    uint256 salt;            // 随机数，防重放
+    OrderType orderType;     // 订单类型
+}
+
+// Domain Separator
+bytes32 DOMAIN_SEPARATOR = keccak256(
+    abi.encode(
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+        keccak256("EasySwap"),
+        keccak256("1"),
+        chainId,
+        address(this)
+    )
+);
+```
+
+### 签名流程
+
+```mermaid
+sequenceDiagram
+    participant 用户 as 🧑 用户
+    participant 钱包 as 🦊 MetaMask
+    participant 合约 as 📜 OrderBook
+    
+    用户->>钱包: 构造 Order 结构
+    钱包->>钱包: EIP-712 签名
+    钱包-->>用户: 返回 signature (v,r,s)
+    
+    Note over 用户: 订单存储在链下数据库
+    
+    用户->>合约: fulfillOrder(order, signature)
+    合约->>合约: ecrecover 验证签名
+    合约->>合约: 执行资产交换
+```
+
+---
+
+## 📊 数据模型
+
+### 核心实体
+
+```sql
+-- Collection: NFT 集合
+CREATE TABLE ob_collection (
+    id BIGINT PRIMARY KEY,
+    address VARCHAR(42) UNIQUE,     -- 合约地址
+    name VARCHAR(128),              -- 集合名称
+    floor_price DECIMAL(30),        -- 地板价
+    volume_total DECIMAL(30)        -- 总交易量
+);
+
+-- Item: NFT 单品
+CREATE TABLE ob_item (
+    id BIGINT PRIMARY KEY,
+    collection_address VARCHAR(42), -- 所属集合
+    token_id VARCHAR(128),          -- Token ID
+    owner VARCHAR(42),              -- 当前持有者
+    list_price DECIMAL(30)          -- 挂单价格
+);
+
+-- Order: 订单
+CREATE TABLE ob_order (
+    id BIGINT PRIMARY KEY,
+    order_id VARCHAR(66) UNIQUE,    -- 订单 Hash
+    order_type TINYINT,             -- 1:Listing 2:Offer 3:CollectionBid
+    order_status TINYINT,           -- 订单状态
+    maker VARCHAR(42),              -- 挂单者
+    price DECIMAL(30)               -- 价格
+);
+
+-- Activity: 交易活动
+CREATE TABLE ob_activity (
+    id BIGINT PRIMARY KEY,
+    activity_type TINYINT,          -- 活动类型
+    tx_hash VARCHAR(66),            -- 交易哈希
+    block_number BIGINT             -- 区块号
+);
+```
+
+---
+
+## 🚀 快速开始
+
+### 环境要求
+
+- Node.js >= 18.x
+- npm / yarn / bun
+- Hardhat
+
+### 1. 安装依赖
+
+```bash
 npm install
 ```
 
-### 2. copy .env.example to .env
-```shell
+### 2. 配置环境变量
+
+```bash
 cp .env.example .env
 ```
 
-### 3. modify .env
-including following fields:
- - SEPOLIA_ALCHEMY_AK
- - SEPOLIA_PK_ONE
- - SEPOLIA_PK_TWO
+编辑 `.env` 文件：
 
+```env
+# Alchemy API Key
+SEPOLIA_ALCHEMY_AK=your_alchemy_api_key
 
-### How to run it
+# 部署账户私钥
+SEPOLIA_PK_ONE=your_private_key
 
-### 1. Compile
-```shell
+# 测试账户私钥 (可选)
+SEPOLIA_PK_TWO=another_private_key
+```
+
+### 3. 编译合约
+
+```bash
 npx hardhat compile
 ```
 
-### 2. Test
-```shell
+### 4. 运行测试
+
+```bash
 npx hardhat test
 ```
 
-## How to deploy
+---
 
-### 1. Deploy
-deploy to sepolia testnet
-```shell
+## 📦 部署
+
+### 部署到 Sepolia 测试网
+
+```bash
+# 部署核心合约
 npx hardhat run --network sepolia scripts/deploy.js
-```
 
-deploy test erc721 
-```shell
+# 部署测试 ERC721 (可选)
 npx hardhat run --network sepolia scripts/deploy_721.js
 ```
 
-## Advanced
+### 合约验证
 
-### 1. Get Contract Size
-```shell
+```bash
+npx hardhat verify --network sepolia <CONTRACT_ADDRESS> <CONSTRUCTOR_ARGS>
+```
+
+---
+
+## 🛠️ 高级功能
+
+### 查看合约大小
+
+```bash
 npx hardhat size-contracts
 ```
 
-### 2. see storage layout of contract
-```shell
-slither-read-storage ./contracts/EasySwapOrderBook.sol --contract-name EasySwapOrderBook --solc-remaps @=node_modules/@ --json storage_layout.json
-```
-see more [slither](https://github.com/crytic/slither)
+### 查看存储布局
 
--EOF-
+使用 [Slither](https://github.com/crytic/slither) 分析工具：
+
+```bash
+slither-read-storage ./contracts/EasySwapOrderBook.sol \
+    --contract-name EasySwapOrderBook \
+    --solc-remaps @=node_modules/@ \
+    --json storage_layout.json
+```
+
+### Gas 优化报告
+
+```bash
+REPORT_GAS=true npx hardhat test
+```
+
+---
+
+## 📚 背景知识
+
+### NFT 交易模式对比
+
+| 模式 | 代表项目 | 价格机制 | 特点 |
+|:---|:---|:---|:---|
+| **订单簿 (OrderBook)** | OpenSea, LooksRare | 用户定价 | 灵活定价，适合高价值 NFT |
+| **AMM** | Sudoswap | 曲线定价 | 即时交易，流动性好 |
+
+### 本项目采用订单簿模式
+
+- **Maker**: 挂单方（创建订单）
+- **Taker**: 吃单方（成交订单）
+- 价格由 Maker 确定，Taker 选择接受
+
+### 相关标准
+
+- [ERC-721](https://eips.ethereum.org/EIPS/eip-721): Non-Fungible Token Standard
+- [EIP-712](https://eips.ethereum.org/EIPS/eip-712): Typed Structured Data Hashing and Signing
+- [EIP-2981](https://eips.ethereum.org/EIPS/eip-2981): NFT Royalty Standard
+
+---
+
+## 🔗 相关项目
+
+| 项目 | 说明 |
+|:---|:---|
+| [EasySwapBackend](../EasySwapBackend) | Go 后端 API 服务 |
+| [EasySwapSync](../EasySwapSync) | 区块链数据同步服务 |
+| [EasySwapBase](../EasySwapBase) | Go 公共工具库 |
+| [nft-market-fe](../nft-market-fe) | Next.js 前端应用 |
+
+---
+
+## 📄 License
+
+MIT License
+
+---
+
+> 📝 **文档版本**: v2.0  
+> 📅 **更新日期**: 2026-02-08  
