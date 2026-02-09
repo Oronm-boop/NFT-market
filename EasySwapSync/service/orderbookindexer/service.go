@@ -1,3 +1,12 @@
+/**
+ * orderbookindexer 包 - 订单簿索引服务
+ *
+ * 功能：
+ *   - 监听链上 EasySwapOrderBook 合约事件（Make, Match, Cancel）
+ *   - 将链上事件同步到数据库（Orders, Activities, Items）
+ *   - 维护 NFT 集合地板价
+ *   - 处理区块链分叉（Reorg）
+ */
 package orderbookindexer
 
 import (
@@ -35,12 +44,18 @@ import (
 )
 
 const (
-	EventIndexType      = 6
-	SleepInterval       = 10  // in seconds
-	SyncBlockPeriod     = 100 // 提高同步效率，每次处理8个区块
-	LogMakeTopic        = "0xfc37f2ff950f95913eb7182357ba3c14df60ef354bc7d6ab1ba2815f249fffe6"
-	LogCancelTopic      = "0x0ac8bb53fac566d7afc05d8b4df11d7690a7b27bdc40b54e4060f9b21fb849bd"
-	LogMatchTopic       = "0xf629aecab94607bc43ce4aebd564bf6e61c7327226a797b002de724b9944b20e"
+	EventIndexType  = 6   // 索引类型：6 代表订单簿事件
+	SleepInterval   = 10  // 轮询间隔：10秒
+	SyncBlockPeriod = 100 // 同步步长：每次请求 100 个区块（提高同步效率）
+
+	// 链上事件 Topic 签名（Keccak256）
+	// LogMake: 创建订单
+	LogMakeTopic = "0xfc37f2ff950f95913eb7182357ba3c14df60ef354bc7d6ab1ba2815f249fffe6"
+	// LogCancel: 取消订单
+	LogCancelTopic = "0x0ac8bb53fac566d7afc05d8b4df11d7690a7b27bdc40b54e4060f9b21fb849bd"
+	// LogMatch: 订单成交
+	LogMatchTopic = "0xf629aecab94607bc43ce4aebd564bf6e61c7327226a797b002de724b9944b20e"
+	// ERC721 Approval: 授权事件
 	ERC721ApprovalTopic = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 	contractAbi         = `[{"inputs":[],"name":"CannotFindNextEmptyKey","type":"error"},{"inputs":[],"name":"CannotFindPrevEmptyKey","type":"error"},{"inputs":[{"internalType":"OrderKey","name":"orderKey","type":"bytes32"}],"name":"CannotInsertDuplicateOrder","type":"error"},{"inputs":[],"name":"CannotInsertEmptyKey","type":"error"},{"inputs":[],"name":"CannotInsertExistingKey","type":"error"},{"inputs":[],"name":"CannotRemoveEmptyKey","type":"error"},{"inputs":[],"name":"CannotRemoveMissingKey","type":"error"},{"inputs":[],"name":"EnforcedPause","type":"error"},{"inputs":[],"name":"ExpectedPause","type":"error"},{"inputs":[],"name":"InvalidInitialization","type":"error"},{"inputs":[],"name":"NotInitializing","type":"error"},{"inputs":[{"internalType":"address","name":"owner","type":"address"}],"name":"OwnableInvalidOwner","type":"error"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"OwnableUnauthorizedAccount","type":"error"},{"inputs":[],"name":"ReentrancyGuardReentrantCall","type":"error"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"uint256","name":"offset","type":"uint256"},{"indexed":false,"internalType":"bytes","name":"msg","type":"bytes"}],"name":"BatchMatchInnerError","type":"event"},{"anonymous":false,"inputs":[],"name":"EIP712DomainChanged","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"uint64","name":"version","type":"uint64"}],"name":"Initialized","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"OrderKey","name":"orderKey","type":"bytes32"},{"indexed":true,"internalType":"address","name":"maker","type":"address"}],"name":"LogCancel","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"OrderKey","name":"orderKey","type":"bytes32"},{"indexed":true,"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"indexed":true,"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"indexed":true,"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"indexed":false,"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"indexed":false,"internalType":"Price","name":"price","type":"uint128"},{"indexed":false,"internalType":"uint64","name":"expiry","type":"uint64"},{"indexed":false,"internalType":"uint64","name":"salt","type":"uint64"}],"name":"LogMake","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"OrderKey","name":"makeOrderKey","type":"bytes32"},{"indexed":true,"internalType":"OrderKey","name":"takeOrderKey","type":"bytes32"},{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"indexed":false,"internalType":"structLibOrder.Order","name":"makeOrder","type":"tuple"},{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"indexed":false,"internalType":"structLibOrder.Order","name":"takeOrder","type":"tuple"},{"indexed":false,"internalType":"uint128","name":"fillPrice","type":"uint128"}],"name":"LogMatch","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"OrderKey","name":"orderKey","type":"bytes32"},{"indexed":false,"internalType":"uint64","name":"salt","type":"uint64"}],"name":"LogSkipOrder","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint128","name":"newProtocolShare","type":"uint128"}],"name":"LogUpdatedProtocolShare","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"address","name":"recipient","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount","type":"uint256"}],"name":"LogWithdrawETH","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"previousOwner","type":"address"},{"indexed":true,"internalType":"address","name":"newOwner","type":"address"}],"name":"OwnershipTransferred","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"address","name":"account","type":"address"}],"name":"Paused","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"address","name":"account","type":"address"}],"name":"Unpaused","type":"event"},{"inputs":[{"internalType":"OrderKey[]","name":"orderKeys","type":"bytes32[]"}],"name":"cancelOrders","outputs":[{"internalType":"bool[]","name":"successes","type":"bool[]"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"components":[{"internalType":"OrderKey","name":"oldOrderKey","type":"bytes32"},{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"newOrder","type":"tuple"}],"internalType":"structLibOrder.EditDetail[]","name":"editDetails","type":"tuple[]"}],"name":"editOrders","outputs":[{"internalType":"OrderKey[]","name":"newOrderKeys","type":"bytes32[]"}],"stateMutability":"payable","type":"function"},{"inputs":[],"name":"eip712Domain","outputs":[{"internalType":"bytes1","name":"fields","type":"bytes1"},{"internalType":"string","name":"name","type":"string"},{"internalType":"string","name":"version","type":"string"},{"internalType":"uint256","name":"chainId","type":"uint256"},{"internalType":"address","name":"verifyingContract","type":"address"},{"internalType":"bytes32","name":"salt","type":"bytes32"},{"internalType":"uint256[]","name":"extensions","type":"uint256[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"OrderKey","name":"","type":"bytes32"}],"name":"filledAmount","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"}],"name":"getBestOrder","outputs":[{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"orderResult","type":"tuple"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"collection","type":"address"},{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"}],"name":"getBestPrice","outputs":[{"internalType":"Price","name":"price","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"collection","type":"address"},{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"Price","name":"price","type":"uint128"}],"name":"getNextBestPrice","outputs":[{"internalType":"Price","name":"nextBestPrice","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"uint256","name":"count","type":"uint256"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"OrderKey","name":"firstOrderKey","type":"bytes32"}],"name":"getOrders","outputs":[{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order[]","name":"resultOrders","type":"tuple[]"},{"internalType":"OrderKey","name":"nextOrderKey","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint128","name":"newProtocolShare","type":"uint128"},{"internalType":"address","name":"newVault","type":"address"},{"internalType":"string","name":"EIP712Name","type":"string"},{"internalType":"string","name":"EIP712Version","type":"string"}],"name":"initialize","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order[]","name":"newOrders","type":"tuple[]"}],"name":"makeOrders","outputs":[{"internalType":"OrderKey[]","name":"newOrderKeys","type":"bytes32[]"}],"stateMutability":"payable","type":"function"},{"inputs":[{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"sellOrder","type":"tuple"},{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"buyOrder","type":"tuple"}],"name":"matchOrder","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"sellOrder","type":"tuple"},{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"buyOrder","type":"tuple"},{"internalType":"uint256","name":"msgValue","type":"uint256"}],"name":"matchOrderWithoutPayback","outputs":[{"internalType":"uint128","name":"costValue","type":"uint128"}],"stateMutability":"payable","type":"function"},{"inputs":[{"components":[{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"sellOrder","type":"tuple"},{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"buyOrder","type":"tuple"}],"internalType":"structLibOrder.MatchDetail[]","name":"matchDetails","type":"tuple[]"}],"name":"matchOrders","outputs":[{"internalType":"bool[]","name":"successes","type":"bool[]"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"enumLibOrder.Side","name":"","type":"uint8"},{"internalType":"Price","name":"","type":"uint128"}],"name":"orderQueues","outputs":[{"internalType":"OrderKey","name":"head","type":"bytes32"},{"internalType":"OrderKey","name":"tail","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"OrderKey","name":"","type":"bytes32"}],"name":"orders","outputs":[{"components":[{"internalType":"enumLibOrder.Side","name":"side","type":"uint8"},{"internalType":"enumLibOrder.SaleKind","name":"saleKind","type":"uint8"},{"internalType":"address","name":"maker","type":"address"},{"components":[{"internalType":"uint256","name":"tokenId","type":"uint256"},{"internalType":"address","name":"collection","type":"address"},{"internalType":"uint96","name":"amount","type":"uint96"}],"internalType":"structLibOrder.Asset","name":"nft","type":"tuple"},{"internalType":"Price","name":"price","type":"uint128"},{"internalType":"uint64","name":"expiry","type":"uint64"},{"internalType":"uint64","name":"salt","type":"uint64"}],"internalType":"structLibOrder.Order","name":"order","type":"tuple"},{"internalType":"OrderKey","name":"next","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"owner","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"pause","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"paused","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"enumLibOrder.Side","name":"","type":"uint8"}],"name":"priceTrees","outputs":[{"internalType":"Price","name":"root","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"protocolShare","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"renounceOwnership","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint128","name":"newProtocolShare","type":"uint128"}],"name":"setProtocolShare","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"newVault","type":"address"}],"name":"setVault","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"newOwner","type":"address"}],"name":"transferOwnership","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"unpause","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"withdrawETH","outputs":[],"stateMutability":"nonpayable","type":"function"},{"stateMutability":"payable","type":"receive"}]`
 	FixForCollection    = 0
@@ -109,8 +124,11 @@ func (s *Service) Start() {
 	threading.GoSafe(s.UpKeepingCollectionFloorChangeLoop)
 }
 
+// SyncOrderBookEventLoop 订单簿事件同步主循环
+// 持续监听链上事件并同步到数据库
 func (s *Service) SyncOrderBookEventLoop() {
 	var indexedStatus base.IndexedStatus
+	// 1. 获取上次同步进度
 	if err := s.db.WithContext(s.ctx).Table(base.IndexedStatusTableName()).
 		Where("chain_id = ? and index_type = ?", s.chainId, EventIndexType).
 		First(&indexedStatus).Error; err != nil {
@@ -128,6 +146,7 @@ func (s *Service) SyncOrderBookEventLoop() {
 		default:
 		}
 
+		// 2. 获取当前链上最新区块高度
 		currentBlockNum, err := s.chainClient.BlockNumber() // 以轮询的方式获取当前区块高度
 		if err != nil {
 			xzap.WithContext(s.ctx).Error("failed on get current block number", zap.Error(err))
@@ -135,11 +154,14 @@ func (s *Service) SyncOrderBookEventLoop() {
 			continue
 		}
 
+		// 3. 检查是否需要等待（防止超过当前高度）
+		// MultiChainMaxBlockDifference 用于防止同步到未确认的区块（特别是 Reorg 风险）
 		if lastSyncBlock > currentBlockNum-MultiChainMaxBlockDifference[s.chain] { // 如果上次同步的区块高度大于当前区块高度，等待一段时间后再次轮询
 			time.Sleep(SleepInterval * time.Second)
 			continue
 		}
 
+		// 4. 计算本次同步的区块范围 [startBlock, endBlock]
 		startBlock := lastSyncBlock
 		endBlock := startBlock + SyncBlockPeriod
 		if endBlock > currentBlockNum-MultiChainMaxBlockDifference[s.chain] { // 如果结束区块高度大于当前区块高度，将结束区块高度设置为当前区块高度
@@ -152,6 +174,7 @@ func (s *Service) SyncOrderBookEventLoop() {
 			Addresses: []string{s.cfg.ContractCfg.DexAddress},
 		}
 
+		// 5. 调用 RPC 获取日志
 		logs, err := s.chainClient.FilterLogs(s.ctx, query) //同时获取多个（SyncBlockPeriod）区块的日志
 		if err != nil {
 			xzap.WithContext(s.ctx).Error("failed on get log",
@@ -184,21 +207,23 @@ func (s *Service) SyncOrderBookEventLoop() {
 			}
 		}
 
+		// 6. 遍历并处理日志
 		for _, log := range logs { // 遍历日志，根据不同的topic处理不同的事件
 			ethLog := log.(ethereumTypes.Log)
 			switch ethLog.Topics[0].String() {
 			case LogMakeTopic:
-				s.handleMakeEvent(ethLog)
+				s.handleMakeEvent(ethLog) // 处理挂单
 			case LogCancelTopic:
-				s.handleCancelEvent(ethLog)
+				s.handleCancelEvent(ethLog) // 处理取消
 			case LogMatchTopic:
-				s.handleMatchEvent(ethLog)
+				s.handleMatchEvent(ethLog) // 处理成交
 			case ERC721ApprovalTopic:
-				s.handleApprovalEvent(ethLog)
+				s.handleApprovalEvent(ethLog) // 处理授权
 			default:
 			}
 		}
 
+		// 7. 更新同步进度到数据库
 		lastSyncBlock = endBlock + 1 // 更新最后同步的区块高度
 		if err := s.db.WithContext(s.ctx).Table(base.IndexedStatusTableName()).
 			Where("chain_id = ? and index_type = ?", s.chainId, EventIndexType).
@@ -214,9 +239,11 @@ func (s *Service) SyncOrderBookEventLoop() {
 	}
 }
 
-// 处理挂单事件
+// 处理挂单事件 (LogMake)
+// 当用户在链上创建订单时触发
 func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
-	// 添加分叉检查
+	// 1. 检查区块链分叉 (Reorg)
+	// 如果发现当前事件所在的交易哈希已经存在，但区块高度不同，说明发生了分叉
 	if err := s.checkAndHandleFork(log.BlockNumber, log.TxHash.String()); err != nil {
 		xzap.WithContext(s.ctx).Error("failed to handle fork for make event",
 			zap.Error(err),
@@ -237,27 +264,31 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 		Salt   uint64
 	}
 
-	// Unpack data
+	// 2. 解析事件日志数据
+	// 使用 ABI Unpack 将日志数据解析到 event 结构体中
 	err := s.parsedAbi.UnpackIntoInterface(&event, "LogMake", log.Data) // 通过ABI解析日志数据
 	if err != nil {
 		xzap.WithContext(s.ctx).Error("Error unpacking LogMake event:", zap.Error(err))
 		return
 	}
-	// Extract indexed fields from topics
-	side := uint8(new(big.Int).SetBytes(log.Topics[1].Bytes()).Uint64())
-	saleKind := uint8(new(big.Int).SetBytes(log.Topics[2].Bytes()).Uint64())
-	maker := common.BytesToAddress(log.Topics[3].Bytes())
+	// 3. 提取 Indexed 字段 (Topic 1, 2, 3)
+	// Topic 0 是事件签名，Topic 1-3 是 indexed 参数
+	side := uint8(new(big.Int).SetBytes(log.Topics[1].Bytes()).Uint64())     // 买单/卖单
+	saleKind := uint8(new(big.Int).SetBytes(log.Topics[2].Bytes()).Uint64()) // 销售类型（定价/拍卖/集合出价）
+	maker := common.BytesToAddress(log.Topics[3].Bytes())                    // 挂单者地址
 
+	// 4. 确定订单类型
 	var orderType int64
-	if side == Bid { // 买单
-		if saleKind == FixForCollection { // 针对集合的买单
+	if side == Bid { // 买单 (Offer)
+		if saleKind == FixForCollection { // 针对集合的买单 (Collection Offer)
 			orderType = multi.CollectionBidOrder
-		} else { // 针对某个具体NFT的买单
+		} else { // 针对某个具体NFT的买单 (Item Offer)
 			orderType = multi.ItemBidOrder
 		}
-	} else { // 卖单
+	} else { // 卖单 (Listing)
 		orderType = multi.ListingOrder
 	}
+	// 5. 创建订单对象并保存到数据库
 	newOrder := multi.Order{
 		CollectionAddress: event.Nft.CollectionAddr.String(),
 		MarketplaceId:     multi.MarketOrderBook,
@@ -282,6 +313,7 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 			zap.Error(err))
 	}
 
+	// 6. 更新或创建 NFT Item 信息
 	newItem := multi.Item{
 		CollectionAddress: event.Nft.CollectionAddr.String(),
 		TokenId:           event.Nft.TokenId.String(),
@@ -299,7 +331,8 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 			zap.Error(err))
 	}
 
-	// 写入 item_external 元数据表
+	// 7. 写入扩展元数据 (createItemExternal)
+	// 尝试获取 metadata_uri 和 image_uri
 	s.createItemExternal(event.Nft.CollectionAddr.String(), event.Nft.TokenId.String())
 
 	blockTime, err := s.chainClient.BlockTimeByNumber(s.ctx, big.NewInt(int64(log.BlockNumber)))
@@ -307,6 +340,8 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 		xzap.WithContext(s.ctx).Error("failed to get block time", zap.Error(err))
 		return
 	}
+	// 8. 记录活动日志 (Activity)
+	// 根据订单类型确定活动类型
 	var activityType int
 	if side == Bid {
 		if saleKind == FixForCollection {
@@ -315,7 +350,7 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 			activityType = multi.ItemBid
 		}
 	} else {
-		activityType = multi.Listing
+		activityType = multi.Listing // 上架活动
 	}
 	newActivity := multi.Activity{ // 将订单信息存入活动表
 		ActivityType:      activityType,
@@ -337,6 +372,8 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 			zap.Error(err))
 	}
 
+	// 9. 将订单添加到 OrderManager 队列
+	// 用于后续的状态管理，如过期检查
 	if err := s.orderManager.AddToOrderManagerQueue(&multi.Order{ // 将订单信息存入订单管理队列
 		ExpireTime:        newOrder.ExpireTime,
 		OrderID:           newOrder.OrderID,
@@ -350,14 +387,17 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 			zap.String("order_id", newOrder.OrderID))
 	}
 
-	// 只有卖单（Listing）才需要维护 collection 和 item 信息
+	// 10. 维护 Collection 和 Item 统计信息
+	// 只有卖单（Listing）才需要维护 collection 和 item 信息（如 floor price 更新）
 	if side == List { // 卖单
 		s.maintainCollectionAndItem(event.Nft.CollectionAddr.String(), event.Nft.TokenId.String(), decimal.NewFromBigInt(event.Price, 0))
 	}
 }
 
+// handleMatchEvent 处理成交事件 (LogMatch)
+// 当买卖双方订单匹配成功时触发
 func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
-	// 添加分叉检查
+	// 1. 检查区块链分叉
 	if err := s.checkAndHandleFork(log.BlockNumber, log.TxHash.String()); err != nil {
 		xzap.WithContext(s.ctx).Error("failed to handle fork for match event",
 			zap.Error(err),
@@ -372,12 +412,16 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 		FillPrice *big.Int
 	}
 
+	// 2. 解析事件日志
 	err := s.parsedAbi.UnpackIntoInterface(&event, "LogMatch", log.Data)
 	if err != nil {
 		xzap.WithContext(s.ctx).Error("Error unpacking LogMatch event:", zap.Error(err))
 		return
 	}
 
+	// 3. 提取订单 ID
+	// Topic 1: makeOrderKey (挂单ID)
+	// Topic 2: takeOrderKey (吃单ID)
 	makeOrderId := HexPrefix + hex.EncodeToString(log.Topics[1].Bytes()) // 通过topic获取订单ID
 	takeOrderId := HexPrefix + hex.EncodeToString(log.Topics[2].Bytes())
 	var owner string
@@ -387,15 +431,20 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 	var to string
 	var sellOrderId string
 	var buyOrder multi.Order
-	if event.MakeOrder.Side == Bid { // 买单， 由卖方发起交易撮合
-		owner = strings.ToLower(event.MakeOrder.Maker.String())
+
+	// 4. 确定买卖双方角色
+	// MakeOrder 是挂单（被动成交），TakeOrder 是吃单（主动成交）
+	// 根据 MakeOrder 的 Side (Bid/List) 判断谁是买家谁是卖家
+	if event.MakeOrder.Side == Bid { // Case A: 挂单是买单 (Bid)，吃单是卖单 (Listing) -> 卖家主动成交 (Accept Offer)
+		owner = strings.ToLower(event.MakeOrder.Maker.String()) // 新 owner 是买家 (MakeOrder.Maker)
 		collection = event.TakeOrder.Nft.CollectionAddr.String()
 		tokenId = event.TakeOrder.Nft.TokenId.String()
-		from = event.TakeOrder.Maker.String()
-		to = event.MakeOrder.Maker.String()
-		sellOrderId = takeOrderId
+		from = event.TakeOrder.Maker.String() // 卖家 (TakeOrder.Maker)
+		to = event.MakeOrder.Maker.String()   // 买家 (MakeOrder.Maker)
+		sellOrderId = takeOrderId             // 卖单是 TakeOrder
 
-		// 更新卖方订单状态
+		// 4.1 更新卖方订单状态 (Filled)
+		// 吃单 (TakeOrder) 通常是立即完全成交的
 		if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 			Where("order_id = ?", takeOrderId).
 			Updates(map[string]interface{}{
@@ -408,6 +457,8 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 			return
 		}
 
+		// 4.2 更新买方订单状态 (Partial Fill or Filled)
+		// 挂单 (MakeOrder) 可能是部分成交
 		// 查询买方订单信息，不存在则无需更新，说明不是从平台前端发起的交易
 		if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 			Where("order_id = ?", makeOrderId).
@@ -437,13 +488,13 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 				return
 			}
 		}
-	} else { // 卖单， 由买方发起交易撮合， 同理
-		owner = strings.ToLower(event.TakeOrder.Maker.String())
+	} else { // Case B: 挂单是卖单 (Listing)，吃单是买单 (Bid) -> 买家主动成交 (Buy Now)
+		owner = strings.ToLower(event.TakeOrder.Maker.String()) // 新 owner 是买家 (TakeOrder.Maker)
 		collection = event.MakeOrder.Nft.CollectionAddr.String()
 		tokenId = event.MakeOrder.Nft.TokenId.String()
-		from = event.MakeOrder.Maker.String()
-		to = event.TakeOrder.Maker.String()
-		sellOrderId = makeOrderId
+		from = event.MakeOrder.Maker.String() // 卖家 (MakeOrder.Maker)
+		to = event.TakeOrder.Maker.String()   // 买家 (TakeOrder.Maker)
+		sellOrderId = makeOrderId             // 卖单是 MakeOrder
 
 		if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 			Where("order_id = ?", makeOrderId).
@@ -491,6 +542,7 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 		xzap.WithContext(s.ctx).Error("failed to get block time", zap.Error(err))
 		return
 	}
+	// 5. 记录交易活动 (Activity: Sale)
 	newActivity := multi.Activity{
 		ActivityType:      multi.Sale,
 		Maker:             event.MakeOrder.Maker.String(),
@@ -511,7 +563,7 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 			zap.Error(err))
 	}
 
-	// 更新NFT的所有者
+	// 6. 更新 NFT 所有权 (Item)
 	if err := s.db.WithContext(s.ctx).Table(multi.ItemTableName(s.chain)).
 		Where("collection_address = ? and token_id = ?", strings.ToLower(collection), tokenId).
 		Update("owner", owner).Error; err != nil {
@@ -520,6 +572,7 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 		return
 	}
 
+	// 7. 发送价格更新事件 (用于计算新的 Floor Price 等)
 	if err := ordermanager.AddUpdatePriceEvent(s.kv, &ordermanager.TradeEvent{ // 将交易信息存入价格更新队列
 		OrderId:        sellOrderId,
 		CollectionAddr: collection,
@@ -535,8 +588,10 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 	}
 }
 
+// handleCancelEvent 处理取消订单事件 (LogCancel)
+// 当用户主动取消订单时触发
 func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
-	// 添加分叉检查
+	// 1. 检查区块链分叉
 	if err := s.checkAndHandleFork(log.BlockNumber, log.TxHash.String()); err != nil {
 		xzap.WithContext(s.ctx).Error("failed to handle fork for cancel event",
 			zap.Error(err),
@@ -545,8 +600,11 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 		return
 	}
 
+	// 2. 提取订单 ID
 	orderId := HexPrefix + hex.EncodeToString(log.Topics[1].Bytes())
 	//maker := common.BytesToAddress(log.Topics[2].Bytes())
+
+	// 3. 更新订单状态为已取消 (Cancelled)
 	if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 		Where("order_id = ?", orderId).
 		Update("order_status", multi.OrderStatusCancelled).Error; err != nil {
@@ -555,6 +613,8 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 		return
 	}
 
+	// 4. 查询被取消的订单信息
+	// 需要获取订单详情来记录 Activity
 	var cancelOrder multi.Order
 	if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 		Where("order_id = ?", orderId).
@@ -569,6 +629,7 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 		xzap.WithContext(s.ctx).Error("failed to get block time", zap.Error(err))
 		return
 	}
+	// 5. 确定活动类型 (Cancel Listing/Bid)
 	var activityType int
 	if cancelOrder.OrderType == multi.ListingOrder {
 		activityType = multi.CancelListing
@@ -577,6 +638,7 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 	} else {
 		activityType = multi.CancelItemBid
 	}
+	// 记录取消活动
 	newActivity := multi.Activity{
 		ActivityType:      activityType,
 		Maker:             cancelOrder.Maker,
@@ -597,6 +659,7 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 			zap.Error(err))
 	}
 
+	// 6. 发送价格更新事件 (用于更新 Floor Price)
 	if err := ordermanager.AddUpdatePriceEvent(s.kv, &ordermanager.TradeEvent{
 		OrderId:        cancelOrder.OrderID,
 		CollectionAddr: cancelOrder.CollectionAddress,
@@ -610,9 +673,10 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 	}
 }
 
-// 处理ERC721 Approval事件
+// handleApprovalEvent 处理 ERC721 授权事件 (Approval)
+// 当 NFT 被授权/取消授权给某个地址时触发
 func (s *Service) handleApprovalEvent(log ethereumTypes.Log) {
-	// 添加分叉检查
+	// 1. 检查分叉
 	if err := s.checkAndHandleFork(log.BlockNumber, log.TxHash.String()); err != nil {
 		xzap.WithContext(s.ctx).Error("failed to handle fork for approval event",
 			zap.Error(err),
@@ -621,12 +685,8 @@ func (s *Service) handleApprovalEvent(log ethereumTypes.Log) {
 		return
 	}
 
-	// Approval 事件结构：event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)
-	if len(log.Topics) < 4 {
-		xzap.WithContext(s.ctx).Error("invalid approval event topics length")
-		return
-	}
-
+	// 2. 解析事件参数
+	// Topics: [Signature, Owner, Approved, TokenId]
 	owner := common.BytesToAddress(log.Topics[1].Bytes())
 	approved := common.BytesToAddress(log.Topics[2].Bytes())
 	tokenId := new(big.Int).SetBytes(log.Topics[3].Bytes())
@@ -779,9 +839,10 @@ func (s *Service) CanMarketBuyNFT(collectionAddress string, tokenId string) (boo
 	return true, "可以购买", nil
 }
 
-// 新增处理分叉的函数
+// checkAndHandleFork 检查并处理区块链分叉 (Reorg)
+// 如果检测到当前事件所在的交易哈希已经存在于数据库中，但区块高度不一致，主要说明发生了分叉
 func (s *Service) checkAndHandleFork(blockNumber uint64, txHash string) error {
-	// 检查交易是否已经存在
+	// 1. 检查交易是否存在但区块高度不同
 	var count int64
 	if err := s.db.WithContext(s.ctx).Table(multi.ActivityTableName(s.chain)).
 		Where("tx_hash = ? AND block_number != ?", txHash, blockNumber).
@@ -789,14 +850,14 @@ func (s *Service) checkAndHandleFork(blockNumber uint64, txHash string) error {
 		return errors.Wrap(err, "failed to check transaction existence")
 	}
 
-	// 如果交易存在但区块高度不同，说明发生了分叉
+	// 2. 如果检测到分叉
 	if count > 0 {
-		// 1. 回滚该交易相关的订单状态
+		// 2.1 回滚受影响的订单状态
 		if err := s.rollbackOrderStatus(txHash); err != nil {
 			return errors.Wrap(err, "failed to rollback order status")
 		}
 
-		// 2. 删除原有的活动记录
+		// 2.2 删除原有的（分叉前的）活动记录
 		if err := s.db.WithContext(s.ctx).Table(multi.ActivityTableName(s.chain)).
 			Where("tx_hash = ?", txHash).
 			Delete(&multi.Activity{}).Error; err != nil {
@@ -811,9 +872,10 @@ func (s *Service) checkAndHandleFork(blockNumber uint64, txHash string) error {
 	return nil
 }
 
-// 新增回滚订单状态的函数
+// rollbackOrderStatus 回滚订单状态
+// 当发生分叉时，将相关订单恢复到分叉前的状态
 func (s *Service) rollbackOrderStatus(txHash string) error {
-	// 查找与该交易相关的活动
+	// 1. 查找该交易产生的所有活动
 	var activities []multi.Activity
 	if err := s.db.WithContext(s.ctx).Table(multi.ActivityTableName(s.chain)).
 		Where("tx_hash = ?", txHash).
@@ -821,10 +883,12 @@ func (s *Service) rollbackOrderStatus(txHash string) error {
 		return errors.Wrap(err, "failed to find activities")
 	}
 
+	// 2. 遍历活动并恢复状态
 	for _, activity := range activities {
 		switch activity.ActivityType {
 		case multi.Sale:
-			// 对于销售活动，恢复订单状态为活跃
+			// 2.1 对于成交 (Sale) 活动
+			// 恢复订单状态为活跃 (Active)
 			if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 				Where("maker = ? AND collection_address = ? AND token_id = ? AND price = ?",
 					activity.Maker, activity.CollectionAddress, activity.TokenId, activity.Price).
@@ -836,7 +900,7 @@ func (s *Service) rollbackOrderStatus(txHash string) error {
 				return errors.Wrap(err, "failed to restore order status for sale")
 			}
 
-			// 恢复NFT所有权
+			// 恢复NFT所有权给 Maker
 			if err := s.db.WithContext(s.ctx).Table(multi.ItemTableName(s.chain)).
 				Where("collection_address = ? AND token_id = ?",
 					activity.CollectionAddress, activity.TokenId).
@@ -845,7 +909,8 @@ func (s *Service) rollbackOrderStatus(txHash string) error {
 			}
 
 		case multi.CancelListing, multi.CancelCollectionBid, multi.CancelItemBid:
-			// 对于取消活动，恢复订单状态为活跃
+			// 2.2 对于取消 (Cancel) 活动
+			// 恢复订单状态为活跃 (Active)
 			if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 				Where("maker = ? AND collection_address = ? AND token_id = ? AND price = ?",
 					activity.Maker, activity.CollectionAddress, activity.TokenId, activity.Price).
@@ -858,10 +923,13 @@ func (s *Service) rollbackOrderStatus(txHash string) error {
 	return nil
 }
 
+// UpKeepingCollectionFloorChangeLoop 地板价维护循环
+// 定期更新集合地板价，并清理过期的历史记录
 func (s *Service) UpKeepingCollectionFloorChangeLoop() {
-	timer := time.NewTicker(comm.DaySeconds * time.Second)
+	// 定时器设置
+	timer := time.NewTicker(comm.DaySeconds * time.Second) // 每天执行一次清理
 	defer timer.Stop()
-	updateFloorPriceTimer := time.NewTicker(comm.MaxCollectionFloorTimeDifference * time.Second)
+	updateFloorPriceTimer := time.NewTicker(comm.MaxCollectionFloorTimeDifference * time.Second) // 定期更新地板价
 	defer updateFloorPriceTimer.Stop()
 
 	var indexedStatus base.IndexedStatus
@@ -880,11 +948,13 @@ func (s *Service) UpKeepingCollectionFloorChangeLoop() {
 			xzap.WithContext(s.ctx).Info("UpKeepingCollectionFloorChangeLoop stopped due to context cancellation")
 			return
 		case <-timer.C:
+			// 清理过期的地板价记录
 			if err := s.deleteExpireCollectionFloorChangeFromDatabase(); err != nil {
 				xzap.WithContext(s.ctx).Error("failed on delete expire collection floor change",
 					zap.Error(err))
 			}
 		case <-updateFloorPriceTimer.C:
+			// 查询并更新地板价
 			if s.cfg.ProjectCfg.Name == gdb.OrderBookDexProject {
 				floorPrices, err := s.QueryCollectionsFloorPrice()
 				if err != nil {
@@ -941,7 +1011,10 @@ WHERE (co.order_type = ? and
 	return collectionFloorPrice, nil
 }
 
+// persistCollectionsFloorChange 持久化集合地板价变更
+// 批量插入 floor_price_change 表
 func (s *Service) persistCollectionsFloorChange(FloorPrices []multi.CollectionFloorPrice) error {
+	// 分批处理，避免 SQL 语句过长
 	for i := 0; i < len(FloorPrices); i += comm.DBBatchSizeLimit {
 		end := i + comm.DBBatchSizeLimit
 		if i+comm.DBBatchSizeLimit >= len(FloorPrices) {
@@ -966,7 +1039,8 @@ func (s *Service) persistCollectionsFloorChange(FloorPrices []multi.CollectionFl
 	return nil
 }
 
-// maintainCollectionAndItem 维护 collection 和 item 信息
+// maintainCollectionAndItem 维护 Collection 和 Item 信息
+// 当有新 Listing 创建时调用
 func (s *Service) maintainCollectionAndItem(collectionAddress, tokenId string, price decimal.Decimal) {
 	// 1. 检查并创建 collection 记录（如果不存在）
 	s.ensureCollectionExists(collectionAddress)
@@ -1225,7 +1299,8 @@ func (s *Service) getImageFromMetadata(metaDataURI string) (string, error) {
 	return imageStr, nil
 }
 
-// createItemExternal 创建 item_external 记录
+// createItemExternal 创建扩展 Item 信息 (Metadata)
+// 获取 TokenURI 并解析 Metadata (Image, Attributes 等)
 // 表结构: ob_item_external_{chain}
 // 唯一索引: (collection_address, token_id)
 func (s *Service) createItemExternal(collectionAddress, tokenId string) {
@@ -1237,6 +1312,7 @@ func (s *Service) createItemExternal(collectionAddress, tokenId string) {
 	var imageURI string
 	tokenIdBig := new(big.Int)
 	if _, ok := tokenIdBig.SetString(tokenId, 10); ok {
+		// 调用合约获取 TokenURI
 		uri, err := s.getTokenURI(collectionAddress, tokenIdBig)
 		if err != nil {
 			xzap.WithContext(s.ctx).Warn("failed to get tokenURI",
@@ -1253,6 +1329,7 @@ func (s *Service) createItemExternal(collectionAddress, tokenId string) {
 
 			// 从tokenURI获取元数据并提取image字段
 			if metaDataURI != "" {
+				// 发送 HTTP 请求获取 Metadata JSON 并解析
 				image, err := s.getImageFromMetadata(metaDataURI)
 				if err != nil {
 					xzap.WithContext(s.ctx).Warn("failed to get image from metadata",
