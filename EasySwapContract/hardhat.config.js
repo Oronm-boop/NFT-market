@@ -18,10 +18,11 @@ if (!SEPOLIA_PK_ONE) {
 const MAINNET_PK = process.env.MAINNET_PK
 const MAINNET_ALCHEMY_AK = process.env.MAINNET_ALCHEMY_AK
 
+const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL
 const SEPOLIA_ALCHEMY_AK = process.env.SEPOLIA_ALCHEMY_AK
-if (!SEPOLIA_ALCHEMY_AK) {
-  throw new Error("Please set your SEPOLIA_ALCHEMY_AK in a .env file")
-}
+
+// Sepolia RPC: 优先使用自定义 RPC URL，否则使用 Alchemy
+const SEPOLIA_RPC = SEPOLIA_RPC_URL || `https://eth-sepolia.g.alchemy.com/v2/${SEPOLIA_ALCHEMY_AK}`
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -39,15 +40,19 @@ module.exports = {
     }
   },
   networks: {
-    mainnet: {
-      url: `https://eth-mainnet.g.alchemy.com/v2/${MAINNET_ALCHEMY_AK}`,
-      accounts: [`${MAINNET_PK}`],
-      saveDeployments: true,
-      chainId: 1,
-    },
+    // mainnet 只在配置了私钥时启用
+    ...(MAINNET_PK ? {
+      mainnet: {
+        url: `https://eth-mainnet.g.alchemy.com/v2/${MAINNET_ALCHEMY_AK}`,
+        accounts: [MAINNET_PK],
+        saveDeployments: true,
+        chainId: 1,
+      }
+    } : {}),
     sepolia: {
-      url: `https://eth-sepolia.g.alchemy.com/v2/${SEPOLIA_ALCHEMY_AK}`,
-      accounts: [`${SEPOLIA_PK_ONE}`, `${SEPOLIA_PK_TWO}`],
+      url: SEPOLIA_RPC,
+      accounts: [SEPOLIA_PK_ONE, SEPOLIA_PK_TWO].filter(Boolean),
+      chainId: 11155111,
     },
     // optimism: {
     //   url: `https://rpc.ankr.com/optimism`,
