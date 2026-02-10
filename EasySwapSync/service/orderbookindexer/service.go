@@ -129,6 +129,8 @@ func (s *Service) Start() {
 func (s *Service) SyncOrderBookEventLoop() {
 	var indexedStatus base.IndexedStatus
 	// 1. 获取上次同步进度
+	// 从 indexed_status 表中读取最后一次成功同步的区块高度
+	// 如果服务重启，将从这个高度继续，防止重复或遗漏
 	if err := s.db.WithContext(s.ctx).Table(base.IndexedStatusTableName()).
 		Where("chain_id = ? and index_type = ?", s.chainId, EventIndexType).
 		First(&indexedStatus).Error; err != nil {
@@ -156,6 +158,7 @@ func (s *Service) SyncOrderBookEventLoop() {
 
 		// 3. 检查是否需要等待（防止超过当前高度）
 		// MultiChainMaxBlockDifference 用于防止同步到未确认的区块（特别是 Reorg 风险）
+		// 如果落后于最新区块不足一定数量（如 ETH 是 8 个区块），则等待
 		if lastSyncBlock > currentBlockNum-MultiChainMaxBlockDifference[s.chain] { // 如果上次同步的区块高度大于当前区块高度，等待一段时间后再次轮询
 			time.Sleep(SleepInterval * time.Second)
 			continue
@@ -175,6 +178,8 @@ func (s *Service) SyncOrderBookEventLoop() {
 		}
 
 		// 5. 调用 RPC 获取日志
+		// FilterLogs: 根据查询条件向节点请求日志数据
+		// 这里会获取 [startBlock, endBlock] 范围内的所有符合条件（Contract Address）的日志
 		logs, err := s.chainClient.FilterLogs(s.ctx, query) //同时获取多个（SyncBlockPeriod）区块的日志
 		if err != nil {
 			xzap.WithContext(s.ctx).Error("failed on get log",
@@ -208,11 +213,12 @@ func (s *Service) SyncOrderBookEventLoop() {
 		}
 
 		// 6. 遍历并处理日志
+		// 对于每个获取到的日志，根据其 Topic[0] (事件签名) 分发给不同的处理函数
 		for _, log := range logs { // 遍历日志，根据不同的topic处理不同的事件
 			ethLog := log.(ethereumTypes.Log)
 			switch ethLog.Topics[0].String() {
 			case LogMakeTopic:
-				s.handleMakeEvent(ethLog) // 处理挂单
+				s.handleMakeEvent(ethLog) // 处理挂单 (Listing/Bid)
 			case LogCancelTopic:
 				s.handleCancelEvent(ethLog) // 处理取消
 			case LogMatchTopic:
@@ -220,10 +226,13 @@ func (s *Service) SyncOrderBookEventLoop() {
 			case ERC721ApprovalTopic:
 				s.handleApprovalEvent(ethLog) // 处理授权
 			default:
+				// 忽略其他未关注的事件
 			}
 		}
 
 		// 7. 更新同步进度到数据库
+		// 处理完一批区块后，更新 indexed_status 表，标记这批区块已处理完成
+		// 下次循环将从 endBlock + 1 开始
 		lastSyncBlock = endBlock + 1 // 更新最后同步的区块高度
 		if err := s.db.WithContext(s.ctx).Table(base.IndexedStatusTableName()).
 			Where("chain_id = ? and index_type = ?", s.chainId, EventIndexType).
@@ -252,16 +261,18 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 		return
 	}
 
+	// 定义用于解析 LogMake 事件非索引参数的匿名结构体
+	// 必须与合约 ABI 中的 event 定义严格匹配
 	var event struct {
-		OrderKey [32]byte
-		Nft      struct {
-			TokenId        *big.Int
-			CollectionAddr common.Address
-			Amount         *big.Int
+		OrderKey [32]byte // 订单唯一标识符
+		Nft      struct { // 嵌套结构体，对应 solidity 中的 struct Asset
+			TokenId        *big.Int       // NFT Token ID
+			CollectionAddr common.Address // NFT 合约地址
+			Amount         *big.Int       // 数量 (ERC721 为 1, ERC1155 可能大于 1)
 		}
-		Price  *big.Int
-		Expiry uint64
-		Salt   uint64
+		Price  *big.Int // 价格 (Wei)
+		Expiry uint64   // 过期时间戳
+		Salt   uint64   // 随机盐值，用于防止哈希冲突
 	}
 
 	// 2. 解析事件日志数据
@@ -273,9 +284,10 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 	}
 	// 3. 提取 Indexed 字段 (Topic 1, 2, 3)
 	// Topic 0 是事件签名，Topic 1-3 是 indexed 参数
-	side := uint8(new(big.Int).SetBytes(log.Topics[1].Bytes()).Uint64())     // 买单/卖单
-	saleKind := uint8(new(big.Int).SetBytes(log.Topics[2].Bytes()).Uint64()) // 销售类型（定价/拍卖/集合出价）
-	maker := common.BytesToAddress(log.Topics[3].Bytes())                    // 挂单者地址
+	// 这些参数不包含在 log.Data 中，必须从 Topics 中解析
+	side := uint8(new(big.Int).SetBytes(log.Topics[1].Bytes()).Uint64())     // Topic 1: 买单/卖单 (0: Listing, 1: Bid)
+	saleKind := uint8(new(big.Int).SetBytes(log.Topics[2].Bytes()).Uint64()) // Topic 2: 销售类型 (0: FixPrice, 1: Auction)
+	maker := common.BytesToAddress(log.Topics[3].Bytes())                    // Topic 3: 挂单者地址
 
 	// 4. 确定订单类型
 	var orderType int64
@@ -289,20 +301,21 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 		orderType = multi.ListingOrder
 	}
 	// 5. 创建订单对象并保存到数据库
+	// 将链上事件数据转换为数据库模型
 	newOrder := multi.Order{
 		CollectionAddress: event.Nft.CollectionAddr.String(),
-		MarketplaceId:     multi.MarketOrderBook,
+		MarketplaceId:     multi.MarketOrderBook, // 标识来自自营市场
 		TokenId:           event.Nft.TokenId.String(),
-		OrderID:           HexPrefix + hex.EncodeToString(event.OrderKey[:]),
-		OrderStatus:       multi.OrderStatusActive,
+		OrderID:           HexPrefix + hex.EncodeToString(event.OrderKey[:]), // OrderKey 转换为十六进制字符串作为 ID
+		OrderStatus:       multi.OrderStatusActive,                           // 初始状态为 Active
 		EventTime:         time.Now().Unix(),
 		ExpireTime:        int64(event.Expiry),
-		CurrencyAddress:   s.cfg.ContractCfg.EthAddress,
+		CurrencyAddress:   s.cfg.ContractCfg.EthAddress, // 目前仅支持 ETH 支付
 		Price:             decimal.NewFromBigInt(event.Price, 0),
 		Maker:             maker.String(),
-		Taker:             ZeroAddress,
-		QuantityRemaining: event.Nft.Amount.Int64(),
-		Size:              event.Nft.Amount.Int64(),
+		Taker:             ZeroAddress,              // 尚未成交，Taker 为空
+		QuantityRemaining: event.Nft.Amount.Int64(), // 剩余可交易数量
+		Size:              event.Nft.Amount.Int64(), // 订单总数量
 		OrderType:         orderType,
 		Salt:              int64(event.Salt),
 	}
@@ -314,12 +327,13 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 	}
 
 	// 6. 更新或创建 NFT Item 信息
+	// 无论是否存在，都尝试更新 Item 信息（主要是为了确保数据库中有这个 Item）
 	newItem := multi.Item{
 		CollectionAddress: event.Nft.CollectionAddr.String(),
 		TokenId:           event.Nft.TokenId.String(),
-		Owner:             maker.String(),
+		Owner:             maker.String(), // 既然能挂单，说明 Maker 大概率是 Owner (或者有授权)
 		Supply:            event.Nft.Amount.Int64(),
-		ListPrice:         decimal.NewFromBigInt(event.Price, 0),
+		ListPrice:         decimal.NewFromBigInt(event.Price, 0), // 更新当前挂牌价
 		ListTime:          time.Now().Unix(),
 		UpdateTime:        time.Now().Unix(),
 	}
@@ -332,7 +346,8 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 	}
 
 	// 7. 写入扩展元数据 (createItemExternal)
-	// 尝试获取 metadata_uri 和 image_uri
+	// 尝试从链上获取 TokenURI，并解析 Metadata (image, attributes 等)
+	// 如果是第一次见到这个 NFT，这步操作会填充其元数据
 	s.createItemExternal(event.Nft.CollectionAddr.String(), event.Nft.TokenId.String())
 
 	blockTime, err := s.chainClient.BlockTimeByNumber(s.ctx, big.NewInt(int64(log.BlockNumber)))
@@ -341,16 +356,17 @@ func (s *Service) handleMakeEvent(log ethereumTypes.Log) {
 		return
 	}
 	// 8. 记录活动日志 (Activity)
+	// Activity 表用于前端展示“活动历史”
 	// 根据订单类型确定活动类型
 	var activityType int
 	if side == Bid {
 		if saleKind == FixForCollection {
-			activityType = multi.CollectionBid
+			activityType = multi.CollectionBid // 集合出价
 		} else {
-			activityType = multi.ItemBid
+			activityType = multi.ItemBid // 单品出价
 		}
 	} else {
-		activityType = multi.Listing // 上架活动
+		activityType = multi.Listing // 上架活动 (Listing)
 	}
 	newActivity := multi.Activity{ // 将订单信息存入活动表
 		ActivityType:      activityType,
@@ -406,10 +422,12 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 		return
 	}
 
+	// 定义用于解析 LogMatch 事件数据的结构体
+	// 注意：LogMatch 事件包含嵌套的 MakeOrder 和 TakeOrder 结构体
 	var event struct {
-		MakeOrder Order
-		TakeOrder Order
-		FillPrice *big.Int
+		MakeOrder Order    // 挂单详情 (被动方)
+		TakeOrder Order    // 吃单详情 (主动方)
+		FillPrice *big.Int // 成交价格
 	}
 
 	// 2. 解析事件日志
@@ -433,18 +451,19 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 	var buyOrder multi.Order
 
 	// 4. 确定买卖双方角色
-	// MakeOrder 是挂单（被动成交），TakeOrder 是吃单（主动成交）
-	// 根据 MakeOrder 的 Side (Bid/List) 判断谁是买家谁是卖家
+	// MakeOrder 是挂单（被动成交，早已存在于数据库中），TakeOrder 是吃单（主动成交，刚刚触发交易）
+	// 根据 MakeOrder 的 Side (Bid/List) 判断谁是买家谁是卖家，以及交易的发起方向
 	if event.MakeOrder.Side == Bid { // Case A: 挂单是买单 (Bid)，吃单是卖单 (Listing) -> 卖家主动成交 (Accept Offer)
+		// 场景：Alice 挂了一个 Offer (MakeOrder), Bob 接受了这个 Offer (TakeOrder)
 		owner = strings.ToLower(event.MakeOrder.Maker.String()) // 新 owner 是买家 (MakeOrder.Maker)
 		collection = event.TakeOrder.Nft.CollectionAddr.String()
 		tokenId = event.TakeOrder.Nft.TokenId.String()
 		from = event.TakeOrder.Maker.String() // 卖家 (TakeOrder.Maker)
 		to = event.MakeOrder.Maker.String()   // 买家 (MakeOrder.Maker)
-		sellOrderId = takeOrderId             // 卖单是 TakeOrder
+		sellOrderId = takeOrderId             // 卖单是 TakeOrder (虽然是 Taker，但在 Offer 匹配场景下，Taker 提供 NFT，即卖单)
 
 		// 4.1 更新卖方订单状态 (Filled)
-		// 吃单 (TakeOrder) 通常是立即完全成交的
+		// 吃单 (TakeOrder) 通常是立即完全成交的，因为它是在交易函数中即时构建的
 		if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 			Where("order_id = ?", takeOrderId).
 			Updates(map[string]interface{}{
@@ -458,8 +477,8 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 		}
 
 		// 4.2 更新买方订单状态 (Partial Fill or Filled)
-		// 挂单 (MakeOrder) 可能是部分成交
-		// 查询买方订单信息，不存在则无需更新，说明不是从平台前端发起的交易
+		// 挂单 (MakeOrder) 可能是部分成交 (例如：求购 10 个，只成交了 1 个)
+		// 查询买方订单信息，不存在则无需更新，说明该订单可能不是从平台前端发起的（或者是数据同步延迟）
 		if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 			Where("order_id = ?", makeOrderId).
 			First(&buyOrder).Error; err != nil {
@@ -489,12 +508,13 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 			}
 		}
 	} else { // Case B: 挂单是卖单 (Listing)，吃单是买单 (Bid) -> 买家主动成交 (Buy Now)
+		// 场景：Alice 挂了一个 Listing (MakeOrder), Bob 直接购买 (TakeOrder)
 		owner = strings.ToLower(event.TakeOrder.Maker.String()) // 新 owner 是买家 (TakeOrder.Maker)
 		collection = event.MakeOrder.Nft.CollectionAddr.String()
 		tokenId = event.MakeOrder.Nft.TokenId.String()
 		from = event.MakeOrder.Maker.String() // 卖家 (MakeOrder.Maker)
 		to = event.TakeOrder.Maker.String()   // 买家 (TakeOrder.Maker)
-		sellOrderId = makeOrderId             // 卖单是 MakeOrder
+		sellOrderId = makeOrderId             // 卖单是 MakeOrder (Listing)
 
 		if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 			Where("order_id = ?", makeOrderId).
@@ -573,6 +593,7 @@ func (s *Service) handleMatchEvent(log ethereumTypes.Log) {
 	}
 
 	// 7. 发送价格更新事件 (用于计算新的 Floor Price 等)
+	// 通知 OrderManager 有新的交易发生，可能影响集合的地板价、交易量等统计数据
 	if err := ordermanager.AddUpdatePriceEvent(s.kv, &ordermanager.TradeEvent{ // 将交易信息存入价格更新队列
 		OrderId:        sellOrderId,
 		CollectionAddr: collection,
@@ -601,6 +622,8 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 	}
 
 	// 2. 提取订单 ID
+	// Topic 1: orderKey (32 bytes)
+	// 将 bytes32转换为 hex string 作为数据库主键
 	orderId := HexPrefix + hex.EncodeToString(log.Topics[1].Bytes())
 	//maker := common.BytesToAddress(log.Topics[2].Bytes())
 
@@ -630,15 +653,17 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 		return
 	}
 	// 5. 确定活动类型 (Cancel Listing/Bid)
+	// 根据原订单类型，决定是 "取消挂单" 还是 "取消出价"
 	var activityType int
 	if cancelOrder.OrderType == multi.ListingOrder {
-		activityType = multi.CancelListing
+		activityType = multi.CancelListing // 取消卖单
 	} else if cancelOrder.OrderType == multi.CollectionBidOrder {
-		activityType = multi.CancelCollectionBid
+		activityType = multi.CancelCollectionBid // 取消集合出价
 	} else {
-		activityType = multi.CancelItemBid
+		activityType = multi.CancelItemBid // 取消单品出价
 	}
 	// 记录取消活动
+	// 即使订单已取消，也需要记录这条 Activity，供前端展示历史记录
 	newActivity := multi.Activity{
 		ActivityType:      activityType,
 		Maker:             cancelOrder.Maker,
@@ -660,6 +685,7 @@ func (s *Service) handleCancelEvent(log ethereumTypes.Log) {
 	}
 
 	// 6. 发送价格更新事件 (用于更新 Floor Price)
+	// 取消卖单可能会影响地板价（例如取消了当前最低价的订单），需要重新计算
 	if err := ordermanager.AddUpdatePriceEvent(s.kv, &ordermanager.TradeEvent{
 		OrderId:        cancelOrder.OrderID,
 		CollectionAddr: cancelOrder.CollectionAddress,
@@ -841,8 +867,11 @@ func (s *Service) CanMarketBuyNFT(collectionAddress string, tokenId string) (boo
 
 // checkAndHandleFork 检查并处理区块链分叉 (Reorg)
 // 如果检测到当前事件所在的交易哈希已经存在于数据库中，但区块高度不一致，主要说明发生了分叉
+// Reorg 发生时，旧链上的交易虽然已经执行，但在新链上可能未执行或执行顺序不同
+// 这里采取的策略是：一旦发现分叉，回滚该交易在数据库中的所有状态变更
 func (s *Service) checkAndHandleFork(blockNumber uint64, txHash string) error {
 	// 1. 检查交易是否存在但区块高度不同
+	// tx_hash 相同但 block_number 不同，是 Reorg 的典型特征
 	var count int64
 	if err := s.db.WithContext(s.ctx).Table(multi.ActivityTableName(s.chain)).
 		Where("tx_hash = ? AND block_number != ?", txHash, blockNumber).
@@ -852,16 +881,24 @@ func (s *Service) checkAndHandleFork(blockNumber uint64, txHash string) error {
 
 	// 2. 如果检测到分叉
 	if count > 0 {
+		xzap.WithContext(s.ctx).Warn("fork detected, rolling back transaction",
+			zap.String("tx_hash", txHash),
+			zap.Uint64("new_block_number", blockNumber))
+
 		// 2.1 回滚受影响的订单状态
+		// 调用 rollbackOrderStatus 函数，根据 txHash 查找所有相关的活动记录，
+		// 并将这些活动所导致的订单状态和NFT所有权变更进行回滚，恢复到分叉前的状态。
 		if err := s.rollbackOrderStatus(txHash); err != nil {
 			return errors.Wrap(err, "failed to rollback order status")
 		}
 
 		// 2.2 删除原有的（分叉前的）活动记录
+		// 删除 Activity 记录，相当于撤销了这笔交易的历史痕迹。
+		// 这是为了确保数据库中只保留属于最终确定链的交易记录。
 		if err := s.db.WithContext(s.ctx).Table(multi.ActivityTableName(s.chain)).
 			Where("tx_hash = ?", txHash).
 			Delete(&multi.Activity{}).Error; err != nil {
-			return errors.Wrap(err, "failed to delete forked activity")
+			return errors.Wrap(err, "failed to delete old activity")
 		}
 
 		xzap.WithContext(s.ctx).Info("handled fork situation",
@@ -873,9 +910,12 @@ func (s *Service) checkAndHandleFork(blockNumber uint64, txHash string) error {
 }
 
 // rollbackOrderStatus 回滚订单状态
-// 当发生分叉时，将相关订单恢复到分叉前的状态
+// 当发生分叉时，将相关订单恢复到分叉前的状态，依赖 Activity 表记录的历史操作
+// 此函数通过查询与给定交易哈希相关的所有活动记录，并根据活动类型执行相应的数据库回滚操作。
 func (s *Service) rollbackOrderStatus(txHash string) error {
 	// 1. 查找该交易产生的所有活动
+	// Activity 表记录了交易类型 (Sale/Cancel) 和相关参数，是回滚的依据。
+	// 这些记录代表了在分叉链上发生的、现在需要撤销的操作。
 	var activities []multi.Activity
 	if err := s.db.WithContext(s.ctx).Table(multi.ActivityTableName(s.chain)).
 		Where("tx_hash = ?", txHash).
@@ -888,29 +928,33 @@ func (s *Service) rollbackOrderStatus(txHash string) error {
 		switch activity.ActivityType {
 		case multi.Sale:
 			// 2.1 对于成交 (Sale) 活动
-			// 恢复订单状态为活跃 (Active)
+			// 之前的操作：订单状态从 Active 变为 Filled (已成交)。
+			// 回滚操作：将订单状态恢复为 Active (活跃)，表示该订单并未成交。
 			if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 				Where("maker = ? AND collection_address = ? AND token_id = ? AND price = ?",
 					activity.Maker, activity.CollectionAddress, activity.TokenId, activity.Price).
 				Updates(map[string]interface{}{
 					"order_status":       multi.OrderStatusActive,
-					"quantity_remaining": gorm.Expr("quantity_remaining + 1"),
-					"taker":              ZeroAddress,
+					"quantity_remaining": 1,           // 假设 ERC721 数量为 1，恢复
+					"taker":              ZeroAddress, // 清除 taker 信息
 				}).Error; err != nil {
 				return errors.Wrap(err, "failed to restore order status for sale")
 			}
 
-			// 恢复NFT所有权给 Maker
+			// 恢复NFT所有权给 Maker (卖方)
+			// 之前的操作：NFT所有权从 Maker 转移到 Taker (买方)。
+			// 回滚操作：将NFT的所有者恢复为原始的 Maker，撤销所有权转移。
 			if err := s.db.WithContext(s.ctx).Table(multi.ItemTableName(s.chain)).
 				Where("collection_address = ? AND token_id = ?",
 					activity.CollectionAddress, activity.TokenId).
 				Update("owner", activity.Maker).Error; err != nil {
-				return errors.Wrap(err, "failed to restore item ownership")
+				return errors.Wrap(err, "failed to restore item owner")
 			}
 
 		case multi.CancelListing, multi.CancelCollectionBid, multi.CancelItemBid:
 			// 2.2 对于取消 (Cancel) 活动
-			// 恢复订单状态为活跃 (Active)
+			// 之前的操作：订单状态从 Active 变为 Cancelled (已取消)。
+			// 回滚操作：将订单状态恢复为 Active (活跃)，表示该订单并未被取消。
 			if err := s.db.WithContext(s.ctx).Table(multi.OrderTableName(s.chain)).
 				Where("maker = ? AND collection_address = ? AND token_id = ? AND price = ?",
 					activity.Maker, activity.CollectionAddress, activity.TokenId, activity.Price).
@@ -919,7 +963,6 @@ func (s *Service) rollbackOrderStatus(txHash string) error {
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -1040,15 +1083,22 @@ func (s *Service) persistCollectionsFloorChange(FloorPrices []multi.CollectionFl
 }
 
 // maintainCollectionAndItem 维护 Collection 和 Item 信息
-// 当有新 Listing 创建时调用
+// 当有新 Listing 创建时调用，用于初始化集合信息和更新地板价。
+// 此函数确保数据库中存在对应的 Collection 和 Item 记录，并更新其上架信息和集合的地板价。
 func (s *Service) maintainCollectionAndItem(collectionAddress, tokenId string, price decimal.Decimal) {
 	// 1. 检查并创建 collection 记录（如果不存在）
+	// 确保每个 NFT 所属的集合在数据库中都有对应的记录。
+	// 如果集合不存在，则会创建一个带有默认信息的新记录。
 	s.ensureCollectionExists(collectionAddress)
 
 	// 2. 更新 item 的上架信息
+	// 更新特定 NFT 的上架价格和上架时间。
+	// 如果该 NFT 之前不存在，则会创建一条新的 Item 记录。
 	s.updateItemListingInfo(collectionAddress, tokenId, price)
 
 	// 3. 更新 collection 的 floor_price
+	// 根据当前集合中所有活跃的 Listing，重新计算并更新该集合的最低地板价。
+	// 这一步确保集合的地板价始终反映最新的市场情况。
 	s.updateCollectionFloorPrice(collectionAddress)
 }
 
