@@ -1,0 +1,65 @@
+# =============================================
+# EasySwap Sync 索引器配置文件
+# =============================================
+
+# ---------- 项目配置 ----------
+[project_cfg]
+name = "OrderBookDex"  # 项目名称，影响数据库表名前缀
+
+# ---------- 监控配置 ----------
+[monitor]
+pprof_enable = true    # 是否开启 pprof 性能分析
+pprof_port = 6060      # pprof 监听端口
+
+# ---------- 日志配置 ----------
+[log]
+compress = false
+leep_days = 7
+level = "info"
+mode = "console"
+path = "logs/relayer"
+service_name = "easyswap-sync"
+
+# ---------- MySQL 数据库配置 ----------
+# 与 Backend 共用同一个数据库
+[db]
+database = "easyswap"
+password = "l746904924.."
+port = 3306
+max_open_conns = 1500
+host = "123.207.206.172"
+log_level = "info"
+max_conn_max_lifetime = 300
+user = "root"
+max_idle_conns = 10
+
+# ---------- Redis 缓存配置 ----------
+# 用于 OrderManager 的消息队列（订单队列、交易事件队列）
+[kv]
+[[kv.redis]]
+pass = "l746904924.."
+host = "123.207.206.172:6379"
+type = "node"
+
+# ---------- 区块链 RPC 节点配置 ----------
+# Sync 通过此节点监听和拉取链上事件（FilterLogs）
+[ankr_cfg]
+api_key = ""
+https_url = "https://sepolia.infura.io/v3/6bcc38f6e5554d6aa1089ee1e4ffe0f7"
+
+# ---------- 链配置 ----------
+[chain_cfg]
+name = "sepolia"       # 链名称（影响数据库表名后缀）
+id = 11155111          # 链 ID
+
+# ---------- 合约地址配置 ----------
+# 已部署合约地址：
+#   EasySwapOrderBook (Proxy): 0xcEE5AA84032D4a53a0F9d2c33F36701c3eAD5895
+#   EasySwapOrderBook (Impl):  0x17B2d83BFE9089cd1D676dE8aebaDCA561f55c96
+#   EasySwapVault (Proxy):     0xaD65f3dEac0Fa9Af4eeDC96E95574AEaba6A2834
+#   EasySwapVault (Impl):      0x5D034EA7F15429Bcb9dFCBE08Ee493F001063AF0
+#   ProxyAdmin:                0xe839419C14188F7b79a0E4C09cFaF612398e7795
+[contract_cfg]
+eth_address = "0x0000000000000000000000000000000000000000"   # ETH 原生代币地址（零地址代表 ETH）
+weth_address = "0x4200000000000000000000000000000000000006"  # WETH 包装代币合约地址
+dex_address = "0xcEE5AA84032D4a53a0F9d2c33F36701c3eAD5895"  # EasySwapOrderBook 代理合约地址（Sync 监听此合约的链上事件）

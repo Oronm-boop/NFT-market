@@ -11,7 +11,7 @@ import {
 
 export const config = getDefaultConfig({
   appName: 'RainbowKit App',
-  projectId: '94066ab3be2718981f226c7407038ba4',
+  projectId: '7d9aef634af18c35295b4b0c57d09a1c',
   chains: [
     mainnet,
     sepolia,
@@ -23,7 +23,7 @@ export const config = getDefaultConfig({
     [mainnet.id]: http('https://mainnet.infura.io/v3/d8ed0bd1de8242d998a1405b6932ab33'),
     // [polygon.id]: http('https://polygon.infura.io/v3/d8ed0bd1de8242d998a1405b6932ab33'),
     // [optimism.id]: http('https://optimism.infura.io/v3/d8ed0bd1de8242d998a1405b6932ab33'),
-    [sepolia.id]: http('https://sepolia.infura.io/v3/d8ed0bd1de8242d998a1405b6932ab33')
+    [sepolia.id]: http('https://sepolia.infura.io/v3/6bcc38f6e5554d6aa1089ee1e4ffe0f7')
   },
   ssr: true,
 });

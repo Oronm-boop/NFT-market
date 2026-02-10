@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/v1/:path*",
-        destination: "http://222.186.34.36:9988/api/v1/:path*", // 开发环境
+        destination: "http://localhost:80/api/v1/:path*", // 本地 Backend
       },
     ];
   },
@@ -28,10 +28,10 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: true,
   },
-  
+
   // 尝试解决 pino/thread-stream 的构建问题
   transpilePackages: ['pino', 'thread-stream', '@rainbow-me/rainbowkit', 'wagmi'],
-  
+
   // 如果还有问题，可以尝试 webpack 配置兜底（但在 turbopack 模式下可能无效）
   webpack: (config) => {
     config.externals.push('pino-pretty', 'lokijs', 'encoding');

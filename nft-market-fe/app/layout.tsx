@@ -20,24 +20,24 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    
-      <html lang="en" suppressHydrationWarning>
-        
-        <body className={`${inter.className} min-h-screen`}>
-          <ThemeProvider attribute="class"
+
+    <html lang="en" suppressHydrationWarning>
+
+      <body className={`${inter.className} min-h-screen`}>
+        <ThemeProvider attribute="class"
           defaultTheme="dark"
           enableSystem={true}
           disableTransitionOnChange>
 
-            <ClientLayout>
-              {children}
-            </ClientLayout>
-          
+          <ClientLayout>
+            {children}
+          </ClientLayout>
+
         </ThemeProvider>
-        </body>
-        
-      </html>
-    
+      </body>
+
+    </html>
+
   )
 }
 
